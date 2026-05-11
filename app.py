@@ -4,82 +4,80 @@ from PIL.ExifTags import TAGS
 import numpy as np
 import os
 
-# --- ฟังก์ชัน AI วิเคราะห์พิกเซล (ELA) ---
-def run_ela(original_image, quality=90):
-    temp_path = "temp_resaved.jpg"
-    if original_image.mode != 'RGB':
-        original_image = original_image.convert('RGB')
+# --- ฟังก์ชัน ELA และส่งคืนค่าความต่างสูงสุด ---
+def run_ela_analysis(image, quality=90):
+    temp_path = "temp_ela.jpg"
+    image.convert('RGB').save(temp_path, 'JPEG', quality=quality)
+    resaved = Image.open(temp_path)
+    ela_image = ImageChops.difference(image.convert('RGB'), resaved)
     
-    # บันทึกภาพใหม่เพื่อเช็กระดับการบีบอัด
-    original_image.save(temp_path, 'JPEG', quality=quality)
-    resaved_image = Image.open(temp_path)
-    
-    # คำนวณหาความต่าง (จุดที่ถูกตัดต่อจะมีความต่างสูง)
-    ela_image = ImageChops.difference(original_image, resaved_image)
-    
-    # ปรับความสว่างเพื่อให้ตาคนมองเห็นจุดผิดปกติได้ชัดเจน
     extrema = ela_image.getextrema()
     max_diff = max([ex[1] for ex in extrema])
-    if max_diff == 0: max_diff = 1
-    scale = 255.0 / max_diff
-    ela_image = ImageEnhance.Brightness(ela_image).enhance(scale)
     
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
-    return ela_image
+    # ปรับแสงโชว์ผู้ใช้
+    scale = 255.0 / (max_diff if max_diff > 0 else 1)
+    ela_display = ImageEnhance.Brightness(ela_image).enhance(scale)
+    
+    os.remove(temp_path)
+    return ela_display, max_diff
 
-# --- ฟังก์ชันดึงข้อมูล Metadata ---
-def get_exif_data(image):
-    exif_data = {}
-    try:
-        info = image._getexif()
-        if info:
-            for tag, value in info.items():
-                decoded = TAGS.get(tag, tag)
-                exif_data[decoded] = value
-    except:
-        return None
-    return exif_data
+# --- ส่วน UI ---
+st.set_page_config(page_title="AI Risk Analyzer", layout="wide")
+st.title("🛡️ Advanced Image Risk Analysis")
+st.write("วิเคราะห์ความเสี่ยงจากการปลอมแปลงภาพด้วยการตรวจสอบหลายมิติ")
 
-# --- ส่วนแสดงผลบนหน้าเว็บ (UI) ---
-st.set_page_config(page_title="AI Image Guard", layout="wide")
-
-st.title("🛡️ AI Image Forgery Detection")
-st.write("ระบบตรวจสอบการปลอมแปลงรูปภาพด้วยเทคนิค ELA และ Metadata Analysis")
-
-uploaded_file = st.file_uploader("📤 อัปโหลดรูปภาพ (JPG, PNG)", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("📤 อัปโหลดรูปภาพ...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
     img = Image.open(uploaded_file)
-    
-    # สร้างคอลัมน์เพื่อเปรียบเทียบ
-    col1, col2 = st.columns(2)
+    risk_score = 0
+    reasons = []
+
+    # 1. ตรวจสอบ Metadata
+    exif = img._getexif()
+    if exif:
+        metadata = {TAGS.get(tag, tag): val for tag, val in exif.items() if tag in TAGS}
+        software = str(metadata.get("Software", ""))
+        if "Adobe" in software or "Photoshop" in software:
+            risk_score += 40
+            reasons.append("🚩 ตรวจพบการใช้ซอฟต์แวร์ตัดต่อระดับมืออาชีพ (Photoshop)")
+    else:
+        risk_score += 20
+        reasons.append("⚠️ ไม่พบข้อมูล Metadata (ภาพอาจถูกลบข้อมูลเพื่อปกปิดร่องรอย)")
+
+    # 2. ตรวจสอบ ELA
+    ela_img, diff_value = run_ela_analysis(img)
+    if diff_value > 50: # ค่าความต่างพิกเซลสูง
+        risk_score += 40
+        reasons.append("🚩 ตรวจพบความผิดปกติของระดับพิกเซล (ELA High Variance)")
+
+    # --- แสดงผลลัพธ์ ---
+    col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("🖼️ ภาพต้นฉบับ")
-        st.image(img, use_container_width=True)
-        
+        st.subheader("🖼️ ภาพวิเคราะห์")
+        st.image(img, use_container_width=True, caption="Original")
+        st.image(ela_img, use_container_width=True, caption="ELA Analysis")
+
     with col2:
-        st.subheader("🔍 วิเคราะห์พิกเซล (ELA)")
-        ela_result = run_ela(img)
-        st.image(ela_result, use_container_width=True)
-        st.info("คำแนะนำ: จุดที่สว่างโดดเด่นออกมาผิดปกติ คือบริเวณที่มีโอกาสถูกตัดต่อสูง")
+        st.subheader("📊 การประเมินความเสี่ยง")
+        
+        # แสดง Gauge คะแนนความเสี่ยง
+        if risk_score >= 70:
+            st.error(f"ระดับความเสี่ยง: {risk_score}% (อันตรายสูง)")
+        elif risk_score >= 30:
+            st.warning(f"ระดับความเสี่ยง: {risk_score}% (ปานกลาง)")
+        else:
+            st.success(f"ระดับความเสี่ยง: {risk_score}% (ปลอดภัย)")
+
+        st.progress(risk_score / 100)
+        
+        st.write("**รายละเอียดที่ตรวจพบ:**")
+        if reasons:
+            for r in reasons:
+                st.write(r)
+        else:
+            st.write("✅ ไม่พบสิ่งผิดปกติเบื้องต้น")
 
     st.divider()
-
-    # วิเคราะห์ข้อมูล Metadata
-    st.subheader("📋 ข้อมูลเบื้องหลังไฟล์ (Metadata)")
-    metadata = get_exif_data(img)
-    
-    if metadata:
-        software = str(metadata.get("Software", "ไม่พบข้อมูลโปรแกรม"))
-        st.write(f"**ซอฟต์แวร์ที่ใช้:** {software}")
-        if "Adobe" in software or "Photoshop" in software:
-            st.error("🚨 ตรวจพบร่องรอยการใช้โปรแกรม Adobe Photoshop")
-        else:
-            st.success("✅ ไม่พบชื่อโปรแกรมตัดต่อยอดนิยมในไฟล์")
-            
-        with st.expander("คลิกเพื่อดูรายละเอียด Metadata ทั้งหมด"):
-            st.write(metadata)
-    else:
-        st.warning("⚠️ ไม่พบข้อมูล Metadata (ภาพอาจถูกลบข้อมูลออก หรือถูกส่งผ่านแอปแชท)")
+    st.info("💡 หมายเหตุ: ระบบนี้ใช้การประมวลผลเชิงสถิติพิกเซลและข้อมูลไฟล์ ผลลัพธ์เป็นการประเมินเบื้องต้นเท่านั้น")
