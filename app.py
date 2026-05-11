@@ -5,118 +5,126 @@ import numpy as np
 import cv2
 import os
 
-# --- 1. ELA: ตรวจการตัดต่อพิกเซล ---
-def run_ela_analysis(image, quality=90):
-    temp_path = "temp_ela.jpg"
-    image.convert('RGB').save(temp_path, 'JPEG', quality=quality)
-    resaved = Image.open(temp_path)
-    ela_image = ImageChops.difference(image.convert('RGB'), resaved)
-    extrema = ela_image.getextrema()
-    max_diff = max([ex[1] for ex in extrema])
-    scale = 255.0 / (max_diff if max_diff > 0 else 1)
-    return ImageEnhance.Brightness(ela_image).enhance(scale), max_diff
+# --- 🎨 Custom Styling (CSS) ---
+st.set_page_config(page_title="AI Forensic Pro", layout="wide", page_icon="🛡️")
 
-# --- 2. FFT Analysis: ตรวจสอบความผิดปกติของความถี่ภาพ (AI Signature) ---
-def analyze_fft(image):
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    .stAlert {
+        border-radius: 10px;
+    }
+    .stMetric {
+        background-color: #1e2130;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #3e4255;
+    }
+    div[data-testid="stExpander"] {
+        border: none !important;
+        background-color: #161b22;
+        border-radius: 10px;
+    }
+    h1 {
+        color: #00ffcc;
+        font-family: 'Courier New', Courier, monospace;
+        text-align: center;
+        text-shadow: 2px 2px #000;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 🧪 Core Functions (เหมือนเดิมแต่ปรับจูนความเร็ว) ---
+def run_ela(image, quality=90):
+    temp = "temp_ela.jpg"
+    image.convert('RGB').save(temp, 'JPEG', quality=quality)
+    resaved = Image.open(temp)
+    ela = ImageChops.difference(image.convert('RGB'), resaved)
+    extrema = ela.getextrema()
+    max_diff = max([ex[1] for ex in extrema]) or 1
+    os.remove(temp)
+    return ImageEnhance.Brightness(ela).enhance(255.0/max_diff), max_diff
+
+def analyze_patterns(image):
     img_gray = np.array(image.convert('L'))
-    dft = np.fft.fft2(img_gray)
-    dft_shift = np.fft.fftshift(dft)
-    magnitude_spectrum = 20 * np.log(np.abs(dft_shift) + 1)
-    
-    # คำนวณหาค่าความผิดปกติในย่านความถี่สูง 
-    # (ภาพจริงจะมี Noise กระจายตัวเป็นธรรมชาติ แต่ AI มักมีรูปแบบซ้ำๆ)
-    h, w = img_gray.shape
-    center_h, center_w = h // 2, w // 2
-    inner_radius = min(h, w) // 4
-    
-    # สร้าง Mask เพื่อดูเฉพาะความถี่รอบนอก (High Frequency)
-    y, x = np.ogrid[:h, :w]
-    mask = (x - center_w)**2 + (y - center_h)**2 > inner_radius**2
-    high_freq_mean = np.mean(magnitude_spectrum[mask])
-    
-    # ปรับภาพ FFT ให้ดูง่าย
-    fft_display = (magnitude_spectrum / magnitude_spectrum.max() * 255).astype(np.uint8)
-    return fft_display, high_freq_mean
+    noise = img_gray.astype(np.float32) - cv2.medianBlur(img_gray, 3).astype(np.float32)
+    lap_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
+    noise_disp = (np.abs(noise) / (np.abs(noise).max() or 1) * 255).astype(np.uint8)
+    return noise_disp, np.std(noise), lap_var
 
-# --- 3. Noise & Sharpness (ตรวจความเนียนผิดปกติ) ---
-def analyze_noise_stat(image):
-    img_gray = np.array(image.convert('L'))
-    noise_extract = img_gray.astype(np.float32) - cv2.medianBlur(img_gray, 3).astype(np.float32)
-    noise_std = np.std(noise_extract)
-    laplacian_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
-    return noise_std, laplacian_var
+# --- 🛠️ Sidebar Configuration ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2092/2092663.png", width=100)
+    st.title("Settings")
+    st.info("ระบบจะวิเคราะห์ภาพโดยอัตโนมัติเมื่ออัปโหลดเสร็จ")
+    ela_quality = st.slider("ELA Sensitivity", 50, 100, 90)
+    st.divider()
+    st.markdown("### 👤 พัฒนาโดย\n[ชื่อของคุณ/GitHub]")
 
-# --- หน้า UI ---
-st.set_page_config(page_title="AI Forensic Specialist", layout="wide")
-st.title("🛡️ Ultimate Forensic & AI Image Analyzer")
+# --- 🚀 Main UI ---
+st.markdown("<h1>🛡️ AI FORENSIC ANALYSIS ENGINE</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #8b949e;'>ตรวจสอบความถูกต้องของรูปภาพด้วยระบบ Multi-Layer Forensic</p>", unsafe_allow_html=True)
+st.divider()
 
-uploaded_file = st.file_uploader("📤 อัปโหลดรูปภาพ...", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
     img = Image.open(uploaded_file)
-    risk_score = 0
-    reasons = []
-
-    with st.spinner('ระบบกำลังสแกนพิกเซลและโครงสร้างความถี่...'):
-        ela_img, ela_diff = run_ela_analysis(img)
-        fft_img, fft_val = analyze_fft(img)
-        n_std, l_var = analyze_noise_stat(img)
-
-        # --- ตรรกะการให้คะแนน (Multi-Criteria Scoring) ---
+    
+    # วิเคราะห์ข้อมูล
+    with st.spinner('🛠️ กำลังถอดรหัสพิกเซล...'):
+        ela_img, ela_val = run_ela(img, ela_quality)
+        noise_img, n_std, l_var = analyze_patterns(img)
         
-        # 1. ตรวจ Metadata
+        # คำนวณความเสี่ยง (Logic)
+        risk = 0
+        reasons = []
+        if ela_val > 60: risk += 40; reasons.append("พิกเซลผิดปกติ (ELA)")
+        if l_var < 100: risk += 30; reasons.append("ความเนียนของภาพสูงผิดปกติ (AI Smoothness)")
+        if n_std < 1.0: risk += 20; reasons.append("ไม่พบเม็ด Noise ตามธรรมชาติ")
+        
+    # --- Layout การแสดงผล ---
+    col_left, col_right = st.columns([1.5, 1])
+
+    with col_left:
+        tab_orig, tab_ela, tab_noise = st.tabs(["🖼️ ภาพต้นฉบับ", "🔍 ELA Scan", "📡 Noise Pattern"])
+        tab_orig.image(img, use_container_width=True)
+        tab_ela.image(ela_img, use_container_width=True)
+        tab_noise.image(noise_img, use_container_width=True)
+
+    with col_right:
+        st.subheader("📊 ผลการวิเคราะห์")
+        
+        # Risk Score UI
+        final_risk = min(risk, 100)
+        color = "#00ffcc" if final_risk < 40 else "#ffcc00" if final_risk < 70 else "#ff4b4b"
+        
+        st.markdown(f"""
+            <div style="text-align: center; border: 2px solid {color}; padding: 20px; border-radius: 15px;">
+                <h2 style="margin: 0; color: {color};">{final_risk}%</h2>
+                <p style="margin: 0; color: white;">Risk Probability</p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        st.write("")
+        st.progress(final_risk / 100)
+        
+        if final_risk >= 70: st.error("🚨 ตรวจพบร่องรอยการดัดแปลงชัดเจน")
+        elif final_risk >= 40: st.warning("⚠️ พบความเสี่ยงปานกลาง")
+        else: st.success("✅ ภาพมีแนวโน้มเป็นของจริง")
+
+        with st.expander("📝 รายละเอียดทางเทคนิค"):
+            for r in reasons: st.write(f"- {r}")
+            st.code(f"ELA Diff: {ela_val:.2f}\nNoise Std: {n_std:.2f}\nSharpness: {l_var:.2f}")
+
+    # --- Metadata Section ---
+    st.divider()
+    with st.expander("🔍 ตรวจสอบ Metadata เชิงลึก (EXIF)"):
         exif = img._getexif()
         if exif:
-            meta = {TAGS.get(t, t): v for t, v in exif.items()}
-            if "Software" in meta:
-                risk_score += 30
-                reasons.append(f"🚩 พบร่องรอยซอฟต์แวร์แก้ไขภาพ: {meta['Software']}")
+            meta = {TAGS.get(t, t): v for t, v in exif.items() if t in TAGS}
+            st.json(meta)
         else:
-            risk_score += 10
-            reasons.append("ℹ️ ไม่พบ Metadata (ปกติสำหรับภาพจากโซเชียล)")
-
-        # 2. ตรวจการตัดต่อ (ELA)
-        if ela_diff > 60:
-            risk_score += 30
-            reasons.append("🚩 พบร่องรอยการบีบอัดพิกเซลไม่เท่ากัน (เสี่ยงต่อการตัดต่อ)")
-
-        # 3. ตรวจสอบร่องรอย AI (FFT & Sharpness)
-        # ภาพ AI มักจะมีความถี่บางส่วนที่ "เป็นระเบียบเกินไป" หรือ "เนียนผิดปกติ"
-        if l_var < 80:
-            risk_score += 25
-            reasons.append("🤖 ภาพมีความเนียนผิดปกติ (AI Smoothness Pattern)")
-        if fft_val < 100:
-            risk_score += 15
-            reasons.append("🤖 โครงสร้างความถี่ภาพไม่สมบูรณ์ (Synthetic Signature)")
-
-    # --- แสดงผลลัพธ์ ---
-    col_v, col_r = st.columns([2, 1])
-
-    with col_v:
-        t1, t2, t3 = st.tabs(["Original", "ELA Analysis", "Frequency Spectrum (FFT)"])
-        t1.image(img, use_container_width=True)
-        t2.image(ela_img, use_container_width=True, caption="จุดที่สว่างคือจุดที่น่าสงสัย")
-        t3.image(fft_img, use_container_width=True, caption="ลายเส้นในนี้บ่งบอกถึงโครงสร้างดิจิทัลของภาพ")
-
-    with col_r:
-        st.subheader("📊 ผลการประเมิน")
-        total_risk = min(risk_score, 100)
-        
-        if total_risk >= 70:
-            st.error(f"ระดับความเสี่ยง: {total_risk}% (อันตรายสูง)")
-        elif total_risk >= 40:
-            st.warning(f"ระดับความเสี่ยง: {total_risk}% (น่าสงสัย)")
-        else:
-            st.success(f"ระดับความเสี่ยง: {total_risk}% (ปลอดภัย)")
-            
-        st.progress(total_risk / 100)
-        
-        st.write("**สิ่งที่ตรวจพบ:**")
-        for r in reasons: st.markdown(f"- {r}")
-        
-        with st.expander("ดูค่าทางเทคนิค"):
-            st.write(f"ELA Diff: {ela_diff:.2f}")
-            st.write(f"FFT Mean: {fft_val:.2f}")
-            st.write(f"Sharpness (Laplacian): {l_var:.2f}")
-
-st.info("💡 หมายเหตุ: ระบบนี้ใช้การวิเคราะห์ทางสถิติพิกเซล หากต้องการตรวจสอบภาพ AI จาก Google อย่างเป็นทางการ แนะนำให้ใช้เครื่องมือที่รองรับ SynthID โดยตรง")
+            st.info("ไม่พบข้อมูล Metadata ในไฟล์นี้")
