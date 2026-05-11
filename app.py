@@ -5,7 +5,7 @@ import numpy as np
 import cv2
 import os
 
-# --- 1. ฟังก์ชัน ELA (ตรวจการตัดต่อ/บีบอัดพิกเซล) ---
+# --- 1. ELA: ตรวจการตัดต่อพิกเซล ---
 def run_ela_analysis(image, quality=90):
     temp_path = "temp_ela.jpg"
     image.convert('RGB').save(temp_path, 'JPEG', quality=quality)
@@ -16,101 +16,107 @@ def run_ela_analysis(image, quality=90):
     scale = 255.0 / (max_diff if max_diff > 0 else 1)
     return ImageEnhance.Brightness(ela_image).enhance(scale), max_diff
 
-# --- 2. ฟังก์ชัน Noise & AI Pattern (ตรวจความเนียนผิดปกติของ AI) ---
-def analyze_advanced_patterns(image):
+# --- 2. FFT Analysis: ตรวจสอบความผิดปกติของความถี่ภาพ (AI Signature) ---
+def analyze_fft(image):
     img_gray = np.array(image.convert('L'))
+    dft = np.fft.fft2(img_gray)
+    dft_shift = np.fft.fftshift(dft)
+    magnitude_spectrum = 20 * np.log(np.abs(dft_shift) + 1)
     
-    # ดึง Noise ออกมา
+    # คำนวณหาค่าความผิดปกติในย่านความถี่สูง 
+    # (ภาพจริงจะมี Noise กระจายตัวเป็นธรรมชาติ แต่ AI มักมีรูปแบบซ้ำๆ)
+    h, w = img_gray.shape
+    center_h, center_w = h // 2, w // 2
+    inner_radius = min(h, w) // 4
+    
+    # สร้าง Mask เพื่อดูเฉพาะความถี่รอบนอก (High Frequency)
+    y, x = np.ogrid[:h, :w]
+    mask = (x - center_w)**2 + (y - center_h)**2 > inner_radius**2
+    high_freq_mean = np.mean(magnitude_spectrum[mask])
+    
+    # ปรับภาพ FFT ให้ดูง่าย
+    fft_display = (magnitude_spectrum / magnitude_spectrum.max() * 255).astype(np.uint8)
+    return fft_display, high_freq_mean
+
+# --- 3. Noise & Sharpness (ตรวจความเนียนผิดปกติ) ---
+def analyze_noise_stat(image):
+    img_gray = np.array(image.convert('L'))
     noise_extract = img_gray.astype(np.float32) - cv2.medianBlur(img_gray, 3).astype(np.float32)
     noise_std = np.std(noise_extract)
-    
-    # ตรวจสอบ Laplacian Variance (ความคมชัด/รายละเอียดระดับลึก)
-    # ภาพ AI มักจะมีความเนียนในบางจุดที่กล้องจริงทำไม่ได้
     laplacian_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
-    
-    noise_display = (np.abs(noise_extract) / (np.abs(noise_extract).max() or 1) * 255).astype(np.uint8)
-    return noise_display, noise_std, laplacian_var
+    return noise_std, laplacian_var
 
-# --- หน้าจอหลัก UI ---
+# --- หน้า UI ---
 st.set_page_config(page_title="AI Forensic Specialist", layout="wide")
-st.title("🔬 Advanced Image & AI Content Analyzer")
-st.markdown("ระบบวิเคราะห์ความเสี่ยงการตัดต่อและการสร้างภาพด้วย AI แบบมัลติฟังก์ชัน")
+st.title("🛡️ Ultimate Forensic & AI Image Analyzer")
 
-uploaded_file = st.file_uploader("📤 อัปโหลดรูปภาพที่สงสัย...", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("📤 อัปโหลดรูปภาพ...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
     img = Image.open(uploaded_file)
     risk_score = 0
     reasons = []
 
-    # --- เริ่มการประมวลผล ---
-    with st.spinner('กำลังวิเคราะห์เชิงลึก...'):
-        ela_display, ela_diff = run_ela_analysis(img)
-        noise_display, noise_std, lap_var = analyze_advanced_patterns(img)
+    with st.spinner('ระบบกำลังสแกนพิกเซลและโครงสร้างความถี่...'):
+        ela_img, ela_diff = run_ela_analysis(img)
+        fft_img, fft_val = analyze_fft(img)
+        n_std, l_var = analyze_noise_stat(img)
+
+        # --- ตรรกะการให้คะแนน (Multi-Criteria Scoring) ---
         
-        # --- ตรรกะการคำนวณคะแนน (Logic) ---
-        
-        # ก) เช็ค Metadata
+        # 1. ตรวจ Metadata
         exif = img._getexif()
         if exif:
-            meta = {TAGS.get(t, t): v for t, v in exif.items() if t in TAGS}
-            soft = str(meta.get("Software", ""))
-            if any(x in soft for x in ["Adobe", "Photoshop", "GIMP", "Canva"]):
+            meta = {TAGS.get(t, t): v for t, v in exif.items()}
+            if "Software" in meta:
                 risk_score += 30
-                reasons.append(f"🚩 ตรวจพบโปรแกรมแก้ไขภาพ: {soft}")
+                reasons.append(f"🚩 พบร่องรอยซอฟต์แวร์แก้ไขภาพ: {meta['Software']}")
         else:
-            # ไม่หักคะแนนเยอะเพราะอาจมาจากโซเชียล
-            risk_score += 10 
-            reasons.append("ℹ️ ไม่พบ Metadata (ปกติสำหรับภาพจาก Facebook/Line)")
+            risk_score += 10
+            reasons.append("ℹ️ ไม่พบ Metadata (ปกติสำหรับภาพจากโซเชียล)")
 
-        # ข) เช็คการตัดต่อ (ELA)
+        # 2. ตรวจการตัดต่อ (ELA)
         if ela_diff > 60:
-            risk_score += 35
-            reasons.append("🚩 พิกเซลมีความต่างระดับสูง (เสี่ยงต่อการตัดแปะ)")
+            risk_score += 30
+            reasons.append("🚩 พบร่องรอยการบีบอัดพิกเซลไม่เท่ากัน (เสี่ยงต่อการตัดต่อ)")
 
-        # ค) เช็คความผิดปกติแบบ AI (Noise & Smoothness)
-        # ภาพ AI มักจะเนียน (Laplacian ต่ำ) หรือไม่มี Noise (STD ต่ำ)
-        if lap_var < 100:
+        # 3. ตรวจสอบร่องรอย AI (FFT & Sharpness)
+        # ภาพ AI มักจะมีความถี่บางส่วนที่ "เป็นระเบียบเกินไป" หรือ "เนียนผิดปกติ"
+        if l_var < 80:
             risk_score += 25
-            reasons.append("🤖 ภาพมีความเนียนผิดปกติ (AI-Generated Pattern Risk)")
-        elif noise_std < 1.0:
-            risk_score += 20
-            reasons.append("🤖 ไม่พบสัญญาณรบกวนตามธรรมชาติ (Digital Synthetic Risk)")
+            reasons.append("🤖 ภาพมีความเนียนผิดปกติ (AI Smoothness Pattern)")
+        if fft_val < 100:
+            risk_score += 15
+            reasons.append("🤖 โครงสร้างความถี่ภาพไม่สมบูรณ์ (Synthetic Signature)")
 
-    # --- ส่วนการแสดงผล ---
-    col_view, col_stat = st.columns([2, 1])
+    # --- แสดงผลลัพธ์ ---
+    col_v, col_r = st.columns([2, 1])
 
-    with col_view:
-        tab1, tab2, tab3 = st.tabs(["Original", "ELA Analysis", "Digital Noise"])
-        tab1.image(img, use_container_width=True)
-        tab2.image(ela_display, use_container_width=True, caption="จุดสว่างบ่งบอกถึงการแก้ไข")
-        tab3.image(noise_display, use_container_width=True, caption="โครงสร้างเม็ด Noise ของภาพ")
+    with col_v:
+        t1, t2, t3 = st.tabs(["Original", "ELA Analysis", "Frequency Spectrum (FFT)"])
+        t1.image(img, use_container_width=True)
+        t2.image(ela_img, use_container_width=True, caption="จุดที่สว่างคือจุดที่น่าสงสัย")
+        t3.image(fft_img, use_container_width=True, caption="ลายเส้นในนี้บ่งบอกถึงโครงสร้างดิจิทัลของภาพ")
 
-    with col_stat:
-        st.subheader("📊 สรุปผลการตรวจสอบ")
-        final_score = min(risk_score, 100)
+    with col_r:
+        st.subheader("📊 ผลการประเมิน")
+        total_risk = min(risk_score, 100)
         
-        if final_score >= 70:
-            st.error(f"ความเสี่ยงโดยรวม: {final_score}%")
-            st.write("**สถานะ: อันตรายสูง (High Risk)**")
-        elif final_score >= 35:
-            st.warning(f"ความเสี่ยงโดยรวม: {final_score}%")
-            st.write("**สถานะ: ควรระวัง (Suspicious)**")
+        if total_risk >= 70:
+            st.error(f"ระดับความเสี่ยง: {total_risk}% (อันตรายสูง)")
+        elif total_risk >= 40:
+            st.warning(f"ระดับความเสี่ยง: {total_risk}% (น่าสงสัย)")
         else:
-            st.success(f"ความเสี่ยงโดยรวม: {final_score}%")
-            st.write("**สถานะ: ปกติ (Likely Original)**")
+            st.success(f"ระดับความเสี่ยง: {total_risk}% (ปลอดภัย)")
             
-        st.progress(final_score / 100)
+        st.progress(total_risk / 100)
         
-        st.write("---")
-        st.write("**หลักฐานที่พบ:**")
-        for r in reasons:
-            st.write(r)
+        st.write("**สิ่งที่ตรวจพบ:**")
+        for r in reasons: st.markdown(f"- {r}")
         
-        st.write(f"**ค่าสถิติเทคนิค:**")
-        st.write(f"- ELA Diff: {ela_diff:.2f}")
-        st.write(f"- Noise Std: {noise_std:.2f}")
-        st.write(f"- Sharpness Score: {lap_var:.2f}")
+        with st.expander("ดูค่าทางเทคนิค"):
+            st.write(f"ELA Diff: {ela_diff:.2f}")
+            st.write(f"FFT Mean: {fft_val:.2f}")
+            st.write(f"Sharpness (Laplacian): {l_var:.2f}")
 
-st.sidebar.markdown("### วิธีอ่านผล")
-st.sidebar.info("หากภาพมาจาก Facebook แล้วขึ้นความเสี่ยง 10-20% ถือว่าเป็นเรื่องปกติเพราะระบบ Metadata หาย แต่ถ้าแตะ 40% ขึ้นไป ให้ดูที่แถบ ELA ว่ามีจุดสว่างวาบผิดปกติหรือไม่")
+st.info("💡 หมายเหตุ: ระบบนี้ใช้การวิเคราะห์ทางสถิติพิกเซล หากต้องการตรวจสอบภาพ AI จาก Google อย่างเป็นทางการ แนะนำให้ใช้เครื่องมือที่รองรับ SynthID โดยตรง")
