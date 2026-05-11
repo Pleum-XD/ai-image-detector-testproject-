@@ -2,29 +2,37 @@ import streamlit as st
 from PIL import Image, ImageChops, ImageEnhance
 from PIL.ExifTags import TAGS
 import numpy as np
+import cv2
+from skimage import filters
 import os
 
-# --- ฟังก์ชัน ELA และส่งคืนค่าความต่างสูงสุด ---
+# --- ฟังก์ชัน 1: ELA Analysis ---
 def run_ela_analysis(image, quality=90):
     temp_path = "temp_ela.jpg"
     image.convert('RGB').save(temp_path, 'JPEG', quality=quality)
     resaved = Image.open(temp_path)
     ela_image = ImageChops.difference(image.convert('RGB'), resaved)
-    
     extrema = ela_image.getextrema()
     max_diff = max([ex[1] for ex in extrema])
-    
-    # ปรับแสงโชว์ผู้ใช้
     scale = 255.0 / (max_diff if max_diff > 0 else 1)
-    ela_display = ImageEnhance.Brightness(ela_image).enhance(scale)
-    
-    os.remove(temp_path)
-    return ela_display, max_diff
+    return ImageEnhance.Brightness(ela_image).enhance(scale), max_diff
 
-# --- ส่วน UI ---
-st.set_page_config(page_title="AI Risk Analyzer", layout="wide")
-st.title("🛡️ Advanced Image Risk Analysis")
-st.write("วิเคราะห์ความเสี่ยงจากการปลอมแปลงภาพด้วยการตรวจสอบหลายมิติ")
+# --- ฟังก์ชัน 2: Noise Pattern Analysis ---
+def analyze_noise(image):
+    # แปลงภาพเป็นขาวดำและเป็น Numpy array
+    img_gray = np.array(image.convert('L'))
+    # ใช้ Median Filter เพื่อหาค่าเฉลี่ย และลบออกจากภาพเดิมเพื่อดึงเฉพาะ Noise
+    noise_extract = img_gray.astype(np.float32) - cv2.medianBlur(img_gray, 3).astype(np.float32)
+    # คำนวณค่าความแปรปรวนของ Noise (Variance)
+    noise_std = np.std(noise_extract)
+    # ทำภาพ Noise ให้ดูง่ายขึ้นเพื่อแสดงผล
+    noise_display = np.abs(noise_extract)
+    noise_display = (noise_display / noise_display.max() * 255).astype(np.uint8)
+    return noise_display, noise_std
+
+# --- หน้า UI ---
+st.set_page_config(page_title="Forensic AI Analyzer", layout="wide")
+st.title("🔬 Forensic Image Risk Analyzer (Multi-Check)")
 
 uploaded_file = st.file_uploader("📤 อัปโหลดรูปภาพ...", type=["jpg", "jpeg", "png"])
 
@@ -33,51 +41,49 @@ if uploaded_file:
     risk_score = 0
     reasons = []
 
-    # 1. ตรวจสอบ Metadata
+    # --- ประมวลผล ---
+    ela_display, ela_diff = run_ela_analysis(img)
+    noise_display, noise_val = analyze_noise(img)
+    
+    # --- ตรรกะการประเมินความเสี่ยง ---
+    # 1. Check Metadata
     exif = img._getexif()
     if exif:
-        metadata = {TAGS.get(tag, tag): val for tag, val in exif.items() if tag in TAGS}
-        software = str(metadata.get("Software", ""))
-        if "Adobe" in software or "Photoshop" in software:
-            risk_score += 40
-            reasons.append("🚩 ตรวจพบการใช้ซอฟต์แวร์ตัดต่อระดับมืออาชีพ (Photoshop)")
+        soft = str({TAGS.get(t, t): v for t, v in exif.items()}.get("Software", ""))
+        if any(x in soft for x in ["Adobe", "Photoshop", "GIMP", "Canva"]):
+            risk_score += 35
+            reasons.append(f"🚩 ตรวจพบร่องรอยซอฟต์แวร์: {soft}")
     else:
-        risk_score += 20
-        reasons.append("⚠️ ไม่พบข้อมูล Metadata (ภาพอาจถูกลบข้อมูลเพื่อปกปิดร่องรอย)")
+        risk_score += 15
+        reasons.append("⚠️ ไม่พบ Metadata (ข้อมูลไฟล์ถูกล้าง)")
 
-    # 2. ตรวจสอบ ELA
-    ela_img, diff_value = run_ela_analysis(img)
-    if diff_value > 50: # ค่าความต่างพิกเซลสูง
-        risk_score += 40
-        reasons.append("🚩 ตรวจพบความผิดปกติของระดับพิกเซล (ELA High Variance)")
+    # 2. Check ELA
+    if ela_diff > 60:
+        risk_score += 35
+        reasons.append("🚩 พิกเซลผิดปกติ (ELA High Variance)")
 
-    # --- แสดงผลลัพธ์ ---
-    col1, col2 = st.columns([1, 1])
+    # 3. Check Noise
+    if noise_val < 2.0 or noise_val > 15.0: # ค่า Noise ที่นิ่งเกินไปหรือโดดเกินไป
+        risk_score += 30
+        reasons.append("🚩 โครงสร้าง Noise ไม่เป็นธรรมชาติ (Noise Inconsistency)")
+
+    # --- แสดงผล ---
+    col_img, col_res = st.columns([2, 1])
     
-    with col1:
-        st.subheader("🖼️ ภาพวิเคราะห์")
-        st.image(img, use_container_width=True, caption="Original")
-        st.image(ela_img, use_container_width=True, caption="ELA Analysis")
+    with col_img:
+        t1, t2, t3 = st.tabs(["Original", "ELA Analysis", "Noise Pattern"])
+        t1.image(img, use_container_width=True)
+        t2.image(ela_display, use_container_width=True)
+        t3.image(noise_display, use_container_width=True, clamp=True)
 
-    with col2:
-        st.subheader("📊 การประเมินความเสี่ยง")
+    with col_res:
+        st.subheader("📊 ผลการประเมิน")
+        st.metric("Total Risk Score", f"{min(risk_score, 100)}%")
+        st.progress(min(risk_score, 100) / 100)
         
-        # แสดง Gauge คะแนนความเสี่ยง
-        if risk_score >= 70:
-            st.error(f"ระดับความเสี่ยง: {risk_score}% (อันตรายสูง)")
-        elif risk_score >= 30:
-            st.warning(f"ระดับความเสี่ยง: {risk_score}% (ปานกลาง)")
-        else:
-            st.success(f"ระดับความเสี่ยง: {risk_score}% (ปลอดภัย)")
-
-        st.progress(risk_score / 100)
+        if risk_score >= 70: st.error("🚨 ระดับอันตราย: พบหลักฐานการตัดต่อชัดเจน")
+        elif risk_score >= 40: st.warning("⚠️ ระดับเฝ้าระวัง: พบความผิดปกติหลายจุด")
+        else: st.success("✅ ระดับปลอดภัย: ไม่พบร่องรอยการดัดแปลง")
         
-        st.write("**รายละเอียดที่ตรวจพบ:**")
-        if reasons:
-            for r in reasons:
-                st.write(r)
-        else:
-            st.write("✅ ไม่พบสิ่งผิดปกติเบื้องต้น")
-
-    st.divider()
-    st.info("💡 หมายเหตุ: ระบบนี้ใช้การประมวลผลเชิงสถิติพิกเซลและข้อมูลไฟล์ ผลลัพธ์เป็นการประเมินเบื้องต้นเท่านั้น")
+        st.write("**รายละเอียดที่พบ:**")
+        for r in reasons: st.write(r)
